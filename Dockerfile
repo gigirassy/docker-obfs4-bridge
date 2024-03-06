@@ -5,7 +5,7 @@ FROM debian:stable-slim
 ARG UID=101
 ARG GID=101
 
-LABEL maintainer="Philipp Winter <phw@torproject.org>"
+LABEL maintainer="meskio <meskio@torproject.org>"
 
 # Install dependencies to add Tor's repository.
 RUN apt-get update && apt-get install -y \
