@@ -30,7 +30,7 @@ BridgeRelay 1
 Nickname ${NICK}
 Log notice file /var/log/tor/log
 Log notice stdout
-ServerTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+ServerTransportPlugin obfs4 exec /usr/bin/lyrebird
 ExtORPort auto
 DataDirectory /var/lib/tor
 

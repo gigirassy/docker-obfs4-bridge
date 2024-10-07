@@ -1,3 +1,9 @@
+# build lyrebird
+FROM golang as builder
+
+RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /lyrebird
+RUN cd /lyrebird && make build
+
 # Base docker image
 FROM debian:stable-slim
 
@@ -10,16 +16,23 @@ LABEL maintainer="meskio <meskio@torproject.org>"
 RUN groupadd -g $GID debian-tor
 RUN useradd -m -u $UID -g $GID -s /bin/false -d /var/lib/tor debian-tor
 
-RUN printf "deb http://deb.debian.org/debian stable-backports main\n" >> /etc/apt/sources.list.d/backports.list
 RUN apt-get update && apt-get install -y \
-    obfs4proxy \
+    ca-certificates \
+    libcap2-bin \
+    --no-install-recommends && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY deb.torproject.org.gpg /usr/share/keyrings/
+RUN printf "deb [signed-by=/usr/share/keyrings/deb.torproject.org.gpg] https://deb.torproject.org/torproject.org stable main\n" >> /etc/apt/sources.list.d/tor.list
+RUN apt-get update && apt-get install -y \
     tor \
     tor-geoipdb \
-    libcap2-bin \
-    --no-install-recommends -t stable-backports
+    --no-install-recommends && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Allow obfs4proxy to bind to ports < 1024.
-RUN setcap cap_net_bind_service=+ep /usr/bin/obfs4proxy
+COPY --from=builder /lyrebird/lyrebird /usr/bin/lyrebird
+# Allow lyrebird to bind to ports < 1024.
+RUN setcap cap_net_bind_service=+ep /usr/bin/lyrebird
 
 # Our torrc is generated at run-time by the script start-tor.sh.
 RUN rm /etc/tor/torrc
