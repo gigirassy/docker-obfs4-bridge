@@ -16,15 +16,10 @@ LABEL maintainer="meskio <meskio@torproject.org>"
 RUN groupadd -g $GID debian-tor
 RUN useradd -m -u $UID -g $GID -s /bin/false -d /var/lib/tor debian-tor
 
-RUN apt-get update && apt-get install -y \
+RUN printf "deb http://deb.debian.org/debian stable-backports main\n" >> /etc/apt/sources.list.d/backports.list
+RUN apt-get update && apt-get install -y -t stable-backports \
     ca-certificates \
     libcap2-bin \
-    --no-install-recommends && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
-
-COPY deb.torproject.org.gpg /usr/share/keyrings/
-RUN printf "deb [signed-by=/usr/share/keyrings/deb.torproject.org.gpg] https://deb.torproject.org/torproject.org stable main\n" >> /etc/apt/sources.list.d/tor.list
-RUN apt-get update && apt-get install -y \
     tor \
     tor-geoipdb \
     --no-install-recommends && \
