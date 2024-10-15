@@ -16,6 +16,7 @@ LABEL maintainer="meskio <meskio@torproject.org>"
 RUN groupadd -g $GID debian-tor
 RUN useradd -m -u $UID -g $GID -s /bin/false -d /var/lib/tor debian-tor
 
+# Use Debian backports instead of db.tpo, since db.tpo doesn't yet support armv7 arch
 RUN printf "deb http://deb.debian.org/debian stable-backports main\n" >> /etc/apt/sources.list.d/backports.list
 RUN apt-get update && apt-get install -y -t stable-backports \
     ca-certificates \
