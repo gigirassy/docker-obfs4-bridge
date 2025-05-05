@@ -16,7 +16,7 @@ then
     for V in $(env | grep "^$ADDITIONAL_VARIABLES_PREFIX"); do
         VKEY_ORG="$(echo $V | cut -d '=' -f1)"
         VKEY="${VKEY_ORG#$ADDITIONAL_VARIABLES_PREFIX}"
-        VVALUE="$(echo $V | cut -d '=' -f2)"
+        VVALUE="${V#*=}"
         echo "Overriding '$VKEY' with value '$VVALUE'"
         ADDITIONAL_VARIABLES="$ADDITIONAL_VARIABLES"$'\n'"$VKEY $VVALUE"
     done
