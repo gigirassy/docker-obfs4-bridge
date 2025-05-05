@@ -1,0 +1,124 @@
+include:
+  - project: tpo/tpa/ci-templates
+    file: [ dependency_proxy.yml ]
+    inputs: { namespace: tpo/anti-censorship }
+    rules:
+      - if: $CI_PROJECT_URL =~ /gitlab.torproject.org/
+
+stages:
+  - container-build
+  - container-mirror
+
+
+# Build the container only if the commit is to main, or it is a tag.
+# If the commit is to main, then the docker image tag should be set to `nightly`.
+# If it is a tag, then the docker image tag should be set to the tag name.
+build-container:
+  variables:
+    TAG: $CI_COMMIT_TAG # Will not be set on a non-tag build, will be set later 
+  stage: container-build
+  parallel:
+    matrix:
+      - ARCH: amd64
+      - ARCH: arm64
+      - ARCH: arm
+      - ARCH: s390x
+  tags:
+    - $ARCH
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - if [ $CI_COMMIT_REF_NAME == "main" ]; then export TAG='nightly'; fi
+    - >-
+      /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${CI_REGISTRY_IMAGE}:${TAG}_${ARCH}"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+    - if: $CI_COMMIT_TAG
+
+merge-manifests:
+  variables:
+    TAG: $CI_COMMIT_TAG
+  stage: container-build
+  needs:
+    - job: build-container
+      artifacts: false
+  image:
+      name: ${DOCKER_REGISTRY_URL}/mplatform/manifest-tool:alpine
+      entrypoint: [""]
+  script:
+    - if [ $CI_COMMIT_REF_NAME == "main" ]; then export TAG='nightly'; fi
+    - >-
+      manifest-tool
+      --username="${CI_REGISTRY_USER}"
+      --password="${CI_REGISTRY_PASSWORD}"
+      push from-args
+      --platforms linux/amd64,linux/arm64,linux/arm,linux/s390x
+      --template "${CI_REGISTRY_IMAGE}:${TAG}_ARCH"
+      --target "${CI_REGISTRY_IMAGE}:${TAG}"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+      when: always
+    - if: $CI_COMMIT_TAG
+      when: always
+
+# If this is a tag, then we want to additionally tag the image as `latest`
+tag-container-release:
+  stage: container-build
+  needs:
+    - job: merge-manifests
+      artifacts: false
+  image: 
+      name: gcr.io/go-containerregistry/crane:debug
+      entrypoint: [""]
+  allow_failure: false
+  variables:
+    CI_REGISTRY: $CI_REGISTRY
+    IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    RELEASE_TAG: $CI_REGISTRY_IMAGE:latest
+  script:
+    - echo "Tagging docker image with stable tag with crane"
+    - echo -n "$CI_JOB_TOKEN" | crane auth login $CI_REGISTRY -u gitlab-ci-token --password-stdin
+    - crane cp $IMAGE_TAG $RELEASE_TAG
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: always
+
+clean-image-tags:
+  stage: container-build
+  needs:
+    - job: merge-manifests
+      artifacts: false
+  image: containers.torproject.org/tpo/tpa/base-images/debian:bookworm
+  before_script:
+    - apt-get update
+    - apt-get install -y jq curl
+  script:
+    - "REGISTRY_ID=$(curl --silent --request GET --header \"JOB-TOKEN: ${CI_JOB_TOKEN}\" \"https://gitlab.torproject.org/api/v4/projects/${CI_PROJECT_ID}/registry/repositories\" | jq '.[].id')"
+    - "curl --request DELETE --data \"name_regex_delete=(latest|${CI_COMMIT_TAG})_.*\" --header \"JOB-TOKEN: ${CI_JOB_TOKEN}\" \"https://gitlab.torproject.org/api/v4/projects/${CI_PROJECT_ID}/registry/repositories/${REGISTRY_ID}/tags\""
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+      when: always
+    - if: $CI_COMMIT_TAG
+      when: always
+      
+mirror-image-to-dockerhub:
+  stage: container-mirror
+  variables:
+    DOCKERHUB_MIRROR_REPOURL: $DOCKERHUB_MIRROR_REPOURL
+    DOCKERHUB_USERNAME: $DOCKERHUB_MIRROR_USERNAME
+    DOCKERHUB_PASSWORD: $DOCKERHUB_MIRROR_PASSWORD
+  image: 
+    name: gcr.io/go-containerregistry/crane:debug
+    entrypoint: [""]
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
+      when: always
+    - if: $CI_COMMIT_TAG
+      when: always
+  script:
+    - echo "$DOCKERHUB_PASSWORD" | crane auth login docker.io -u $DOCKERHUB_MIRROR_USERNAME --password-stdin
+    - crane cp -a containers.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake $DOCKERHUB_MIRROR_REPOURL
