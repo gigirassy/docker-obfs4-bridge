@@ -103,21 +103,23 @@ clean-image-tags:
       when: always
     - if: $CI_COMMIT_TAG
       when: always
-      
-mirror-image-to-dockerhub:
-  stage: container-mirror
-  variables:
-    DOCKERHUB_MIRROR_REPOURL: $DOCKERHUB_MIRROR_REPOURL
-    DOCKERHUB_USERNAME: $DOCKERHUB_MIRROR_USERNAME
-    DOCKERHUB_PASSWORD: $DOCKERHUB_MIRROR_PASSWORD
-  image: 
-    name: gcr.io/go-containerregistry/crane:debug
-    entrypoint: [""]
-  rules:
-    - if: $CI_COMMIT_REF_NAME == "main"
-      when: always
-    - if: $CI_COMMIT_TAG
-      when: always
-  script:
-    - echo "$DOCKERHUB_PASSWORD" | crane auth login docker.io -u $DOCKERHUB_MIRROR_USERNAME --password-stdin
-    - crane cp -a containers.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake $DOCKERHUB_MIRROR_REPOURL
+
+# disabled while we discuss if we can deprecate arm and 386
+# https://gitlab.torproject.org/tpo/anti-censorship/docker-obfs4-bridge/-/issues/25
+#mirror-image-to-dockerhub:
+#  stage: container-mirror
+#  variables:
+#    DOCKERHUB_MIRROR_REPOURL: $DOCKERHUB_MIRROR_REPOURL
+#    DOCKERHUB_USERNAME: $DOCKERHUB_MIRROR_USERNAME
+#    DOCKERHUB_PASSWORD: $DOCKERHUB_MIRROR_PASSWORD
+#  image: 
+#    name: gcr.io/go-containerregistry/crane:debug
+#    entrypoint: [""]
+#  rules:
+#    - if: $CI_COMMIT_REF_NAME == "main"
+#      when: always
+#    - if: $CI_COMMIT_TAG
+#      when: always
+#  script:
+#    - echo "$DOCKERHUB_PASSWORD" | crane auth login docker.io -u $DOCKERHUB_MIRROR_USERNAME --password-stdin
+#    - crane cp -a containers.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake $DOCKERHUB_MIRROR_REPOURL
