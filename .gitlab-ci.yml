@@ -21,7 +21,6 @@ build-container:
     matrix:
       - ARCH: amd64
       - ARCH: arm64
-      - ARCH: arm
       - ARCH: s390x
   tags:
     - $ARCH
