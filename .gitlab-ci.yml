@@ -55,7 +55,7 @@ merge-manifests:
       --username="${CI_REGISTRY_USER}"
       --password="${CI_REGISTRY_PASSWORD}"
       push from-args
-      --platforms linux/amd64,linux/arm64,linux/arm,linux/s390x
+      --platforms linux/amd64,linux/arm64,linux/s390x
       --template "${CI_REGISTRY_IMAGE}:${TAG}_ARCH"
       --target "${CI_REGISTRY_IMAGE}:${TAG}"
   rules:
