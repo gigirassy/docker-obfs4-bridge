@@ -8,6 +8,7 @@ include:
 stages:
   - container-build
   - container-mirror
+  - deploy
 
 
 # Build the container only if the commit is to main, or it is a tag.
@@ -102,6 +103,16 @@ clean-image-tags:
     - if: $CI_COMMIT_REF_NAME == "main"
       when: always
     - if: $CI_COMMIT_TAG
+      when: always
+
+deploy-rdsys-staging:
+  stage: deploy
+  tags:
+    - shell
+  script:
+    - /usr/local/bin/tpa-rdsys-staging-ci-deploy ${CI_REGISTRY_IMAGE}:nightly
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "main"
       when: always
 
 # disabled while we discuss if we can deprecate arm and 386
