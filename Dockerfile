@@ -40,17 +40,20 @@ RUN set -eux; \
       echo "deb-src [arch=$ARCH signed-by=/usr/share/keyrings/deb.torproject.org-keyring.gpg] https://deb.torproject.org/torproject.org $CODENAME main" \
         >> /etc/apt/sources.list.d/tor.list; \
       apt-get update; \
+      # install tor from Tor Project repo and libcap2-bin (for setcap)
       apt-get install -y --no-install-recommends \
         tor \
         deb.torproject.org-keyring \
-        tor-geoipdb; \
+        tor-geoipdb \
+        libcap2-bin; \
     else \
       # Architecture not supported by Tor Project repo -> use Debian backports (armhf, other archs)
       echo "deb http://deb.debian.org/debian stable-backports main" > /etc/apt/sources.list.d/backports.list; \
       apt-get update; \
       apt-get install -y -t stable-backports \
         tor \
-        tor-geoipdb; \
+        tor-geoipdb \
+        libcap2-bin; \
     fi; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
