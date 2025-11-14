@@ -17,29 +17,41 @@ LABEL maintainer="meskio <meskio@torproject.org>"
 RUN groupadd -g $GID debian-tor \
  && useradd -m -u $UID -g $GID -s /bin/false -d /var/lib/tor debian-tor
 
-# Install prerequisites to add the Tor Project APT repository and GPG key,
-# then add the upstream Tor Project repository and install tor from there.
+# Install Tor from the Tor Project APT repository when the architecture is supported.
+# If the architecture is not supported by the Tor Project repo (only amd64, arm64, i386),
+# fall back to Debian stable-backports (as noted in the instructions).
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        gnupg \
-        dirmngr \
-        lsb-release; \
-    \
-    # Fetch and install the Tor Project archive keyring (dearmor to keyring file)
-    curl -fsSL https://deb.torproject.org/torproject.org/gpgkey | gpg --dearmor > /usr/share/keyrings/tor-archive-keyring.gpg; \
-    \
-    # Add Tor Project APT repository (use 'stable' so it remains compatible with Debian stable)
-    echo "deb [signed-by=/usr/share/keyrings/tor-archive-keyring.gpg] https://deb.torproject.org/torproject.org $(lsb_release -cs) main" \
-        > /etc/apt/sources.list.d/torproject.list; \
-    \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
+      apt-transport-https \
+      ca-certificates \
+      wget \
+      gnupg \
+      dirmngr \
+      lsb-release; \
+    ARCH="$(dpkg --print-architecture)"; \
+    if [ "$ARCH" = "amd64" ] || [ "$ARCH" = "arm64" ] || [ "$ARCH" = "i386" ]; then \
+      # Add Tor Project signing key (kept in keyring file)
+      wget -qO- https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc \
+        | gpg --dearmor > /usr/share/keyrings/deb.torproject.org-keyring.gpg; \
+      CODENAME="$(lsb_release -sc)"; \
+      echo "deb [arch=$ARCH signed-by=/usr/share/keyrings/deb.torproject.org-keyring.gpg] https://deb.torproject.org/torproject.org $CODENAME main" \
+        > /etc/apt/sources.list.d/tor.list; \
+      echo "deb-src [arch=$ARCH signed-by=/usr/share/keyrings/deb.torproject.org-keyring.gpg] https://deb.torproject.org/torproject.org $CODENAME main" \
+        >> /etc/apt/sources.list.d/tor.list; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        tor \
+        deb.torproject.org-keyring \
+        tor-geoipdb; \
+    else \
+      # Architecture not supported by Tor Project repo -> use Debian backports (armhf, other archs)
+      echo "deb http://deb.debian.org/debian stable-backports main" > /etc/apt/sources.list.d/backports.list; \
+      apt-get update; \
+      apt-get install -y -t stable-backports \
         tor \
         tor-geoipdb; \
-    \
+    fi; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
