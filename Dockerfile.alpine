@@ -1,5 +1,5 @@
 # --- builder: build a small static lyrebird binary on Alpine ---
-FROM golang:1.21-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 # keep build image minimal
 RUN apk add --no-cache git make
@@ -12,58 +12,43 @@ RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transp
 WORKDIR /src/lyrebird
 
 # Build with flags to minimize size. CGO disabled for a static binary.
-# Adjust the final output path to match what you expect to COPY from.
+# Try building ./cmd/lyrebird first, fall back to building from repo root.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
     (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
 # --- runtime: minimal Alpine with tor, bash, libcap for setcap ---
 FROM alpine:latest
 
-# allow build-time override for UID / GID for compatibility
 ARG UID=101
 ARG GID=101
 
 LABEL maintainer="meskio <meskio@torproject.org>"
 
 # create user/group with the same UID/GID as the Debian image did
-# -G flag on adduser expects a group name already present, so create the group first
 RUN addgroup -g "${GID}" debian-tor \
  && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
 
-# Install runtime packages:
-# - tor : Tor daemon from Alpine (keeps same package name 'tor' so swapping is safe)
-# - bash: required by your entrypoint
-# - libcap: provides setcap to keep binding <1024 capability
-# - ca-certificates: TLS roots for tor/other HTTPS operations
-# Install and clean in one layer for minimal image size.
 RUN apk add --no-cache \
       tor \
       bash \
       libcap \
       ca-certificates
 
-# copy lyrebird from builder stage
 COPY --from=builder /lyrebird/lyrebird /usr/bin/lyrebird
 
-# make sure binary is executable (should already be), then give it the capability to bind low ports
 RUN chmod 0755 /usr/bin/lyrebird \
  && setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
 
-# Our torrc is generated at run-time by the script start-tor.sh (remove any default)
 RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
 
-# ensure tor-related dirs are owned by the debian-tor user we created
 RUN mkdir -p /var/log/tor /var/lib/tor \
  && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
 
-# copy entry/start scripts and helper
 COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
 
 RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
 
-# switch to the debian-tor user (keeps behavior compatible with previous image)
 USER debian-tor
 
-# Use bash explicitly for the entrypoint so scripts that expect bash features work
 CMD [ "/bin/bash", "/usr/local/bin/start-tor.sh" ]
