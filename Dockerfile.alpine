@@ -1,22 +1,27 @@
-# --- builder: build a small static lyrebird binary on Alpine ---
+# Dockerfile.alpine - minimal musl-based image using musl allocator (default)
+# Builds a small static lyrebird binary (CGO disabled), strips symbols, and
+# sets runtime env vars that limit Go's heap growth.
+
+# Builder stage: small Go image (matches lyrebird go.mod requirement)
 FROM golang:1.22-alpine AS builder
 
-# keep build image minimal
+# Build-time deps
 RUN apk add --no-cache git make
 
 WORKDIR /src
 
-# fetch lyrebird and build a small static binary
+# Clone and build lyrebird
 RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
 
 WORKDIR /src/lyrebird
 
-# Build with flags to minimize size. CGO disabled for a static binary.
-# Try building ./cmd/lyrebird first, fall back to building from repo root.
+# Build static, trimmed binary (CGO disabled). Try common entrypoints.
+# - CGO_ENABLED=0 produces a statically-linked binary (no jemalloc/mimalloc),
+# - -trimpath and -ldflags "-s -w" strip debug symbols to reduce size.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
     (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
-# --- runtime: minimal Alpine with tor, bash, libcap for setcap ---
+# Runtime: minimal Alpine with tor and bash, using musl allocator by default
 FROM alpine:latest
 
 ARG UID=101
@@ -24,31 +29,56 @@ ARG GID=101
 
 LABEL maintainer="meskio <meskio@torproject.org>"
 
-# create user/group with the same UID/GID as the Debian image did
+# Create user/group matching Debian-derived setup
 RUN addgroup -g "${GID}" debian-tor \
  && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
 
+# Install only needed runtime packages:
+# - tor (from Alpine) — keeps package name 'tor' so swapping is easy
+# - bash for entrypoint compatibility
+# - libcap for setcap
+# - ca-certificates for TLS
 RUN apk add --no-cache \
       tor \
       bash \
       libcap \
       ca-certificates
 
+# Copy the lyrebird binary from builder
 COPY --from=builder /lyrebird/lyrebird /usr/bin/lyrebird
 
+# Ensure executable and give it capability to bind <1024 ports
 RUN chmod 0755 /usr/bin/lyrebird \
- && setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
+ && setcap cap_net_bind_service=+ep /usr/bin/lyrebird
 
+# Remove any default torrc (your start script generates torrc)
 RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
 
+# Ensure tor data/log dirs exist with correct ownership
 RUN mkdir -p /var/log/tor /var/lib/tor \
  && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
 
+# Copy entry script(s) — ensure filenames are ASCII hyphens in the repo
 COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
 
 RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
 
+# Runtime memory/tuning environment variables:
+# - GOGC controls heap growth (percent). Lower => more frequent GC => smaller heap.
+#   Good starting values: 50 (conservative) or 30 (more aggressive).
+# - GOMAXPROCS limits number of OS threads Go will use. Reducing can lower concurrency
+#   (and memory for stacks) while possibly affecting throughput — tune carefully.
+# - GOMEMLIMIT (optional): If Lyrebird was built with Go >= 1.19+, you can set this
+#   to a rad value like "256MiB" to tell the runtime an upper soft memory limit.
+#   NOTE: GOMEMLIMIT is available in modern Go releases; if unsure, omit it.
+ENV GOGC=50 \
+    GOMAXPROCS=1
+# Optionally uncomment and set if you built with Go >=1.19 and want a hard-ish limit:
+# ENV GOMEMLIMIT=256MiB
+
+# Drop to the non-root user used previously
 USER debian-tor
 
+# Use bash for the entrypoint (keeps behaviour compatible)
 CMD [ "/bin/bash", "/usr/local/bin/start-tor.sh" ]
