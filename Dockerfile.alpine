@@ -47,7 +47,7 @@ RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
 RUN mkdir -p /var/log/tor /var/lib/tor \
  && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
 
-COPY start‑tor.sh /usr/local/bin/start‑tor.sh
+COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
 
 # entrypoint wrapper to preload mimalloc
@@ -63,13 +63,13 @@ if [ -f /usr/lib/libmimalloc.so ] || [ -f /lib/libmimalloc.so ]; then
   fi
 fi
 
-exec /bin/bash /usr/local/bin/start‑tor.sh
+exec /bin/bash /usr/local/bin/start-tor.sh
 EOF
 
 RUN chmod 0755 /usr/local/bin/entrypoint.sh \
-    /usr/local/bin/start‑tor.sh \
+    /usr/local/bin/start-tor.sh \
     /usr/local/bin/get-bridge-line
 
-USER debian‑tor
+USER debian-tor
 
 CMD [ "/usr/local/bin/entrypoint.sh" ]
