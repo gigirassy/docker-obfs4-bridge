@@ -1,139 +1,114 @@
-# Dockerfile.alpine (fixed)
-ARG OPENSSL_VERSION='3.5.2'
-ARG UID=101
-ARG GID=101
+name: Docker
 
-# ----------------------
-# Builder stage
-# ----------------------
-FROM golang:1.22-alpine AS builder
-ARG OPENSSL_VERSION
+on:
+  schedule:
+    - cron: '25 11 * * *'
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ "main" ]
 
-# Build deps for lyrebird + OpenSSL
-RUN apk add --no-cache \
-      git \
-      curl \
-      perl \
-      build-base \
-      zlib-dev \
-      linux-headers \
-      make \
-      ca-certificates \
-      tar
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
-WORKDIR /src
+permissions:
+  contents: read
+  packages: write
+  id-token: write
 
-# Clone and build lyrebird (static-friendly flags)
-RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
-WORKDIR /src/lyrebird
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
-    (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-# Download OpenSSL source
-WORKDIR /src
-RUN curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+      max-parallel: 1
 
-WORKDIR /src/openssl-${OPENSSL_VERSION}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-# Build OpenSSL with minimal flags (enable EC optimization + no deprecated APIs)
-RUN \
-  ARCH="$(uname -m)"; \
-  if [ "$ARCH" = "x86_64" ]; then TARGET=linux-x86_64; \
-  elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then TARGET=linux-aarch64; \
-  else TARGET=linux-generic; fi; \
-  echo "OpenSSL build target: $TARGET"; \
-  JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1); \
-  if [ "$JOBS" -gt 2 ]; then JOBS=2; fi; \
-  echo "Building OpenSSL (JOBS=$JOBS)"; \
-  ./Configure "$TARGET" shared zlib enable-ec_nistp_64_gcc_128 no-deprecated && \
-  make -j${JOBS} || (echo "parallel build failed, retrying single-threaded"; make -j1) && \
-  make install_sw
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v4.0.0
+        with:
+          cosign-release: 'v2.2.4'
 
-# Collect runtime libs into a package. Search common lib dirs (lib, lib64, /usr/local, /usr).
-RUN set -eux; \
-    mkdir -p /openssl-dist/lib; \
-    FOUND=0; \
-    for D in /usr/local/openssl/lib /usr/local/openssl/lib64 /usr/local/lib /usr/local/lib64 /usr/lib /usr/lib64 /lib /lib64; do \
-      if [ -d "$D" ]; then \
-        echo "Checking $D for OpenSSL libs"; \
-        cp -a "$D"/*.so* /openssl-dist/lib/ 2>/dev/null || true; \
-        if [ "$(ls -A /openssl-dist/lib 2>/dev/null || true)" ]; then FOUND=1; break; fi; \
-      fi; \
-    done; \
-    if [ "$FOUND" -ne 1 ]; then \
-      echo "ERROR: no OpenSSL shared libraries found after install"; \
-      echo "Listing likely directories for debugging:"; \
-      for D in /usr/local/openssl/lib /usr/local/openssl/lib64 /usr/local/lib /usr/local/lib64 /usr/lib /usr/lib64 /lib /lib64; do echo "== $D =="; ls -la "$D" 2>/dev/null || true; done; \
-      false; \
-    fi; \
-    # Optionally strip to reduce size if strip is available
-    if command -v strip >/dev/null 2>&1; then for f in /openssl-dist/lib/*.so*; do strip --strip-unneeded "$f" || true; done; fi; \
-    # package tarball
-    tar -C /openssl-dist -czf /openssl-dist.tar.gz .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-# Prepare lyrebird for runtime copy
-RUN mkdir -p /lyrebird-dist && cp /lyrebird/lyrebird /lyrebird-dist/ || true
+      - name: Log in to registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-# ----------------------
-# Final runtime stage
-# ----------------------
-FROM alpine:latest
-ARG UID=101
-ARG GID=101
-ARG OPENSSL_VERSION
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-LABEL maintainer="meskio <meskio@torproject.org>"
+      # Use native ARM runner when building for arm64
+      - name: Select runner for platform
+        run: echo "Using platform ${{ matrix.platform }}"
 
-# create user/group matching UID/GID for compatibility
-RUN addgroup -g "${GID}" debian-tor \
- && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
+      - name: Build and push (Debian)
+        id: dp
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-# runtime packages
-RUN apk add --no-cache \
-      tor \
-      bash \
-      libcap \
-      ca-certificates \
-      tar
+      - name: Prepare Alpine tags
+        id: alpine-tags
+        shell: bash
+        run: |
+          tags="${{ steps.meta.outputs.tags }}"
+          alpine=""
+          IFS=',' read -ra arr <<< "$tags"
+          for t in "${arr[@]}"; do
+            if [[ "$t" == *":"* ]]; then
+              base="${t%%:*}"
+              tagpart="${t##*:}"
+              alpine+="${base}:${tagpart}-alpine,"
+            else
+              alpine+="${t}-alpine,"
+            fi
+          done
+          alpine="${alpine%,}"
+          echo "tags=$alpine" >> "$GITHUB_OUTPUT"
 
-# copy lyrebird
-COPY --from=builder /lyrebird-dist/lyrebird /usr/bin/lyrebird
-RUN chmod 0755 /usr/bin/lyrebird
+      - name: Build and push (Alpine)
+        id: ap
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.alpine
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.alpine-tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-# copy & extract OpenSSL runtime tarball and deploy libs to /usr/lib and /lib (fail fast if missing)
-COPY --from=builder /openssl-dist.tar.gz /tmp/openssl-dist.tar.gz
-RUN set -eux; \
-    mkdir -p /tmp/openssl-dist; \
-    tar -xzf /tmp/openssl-dist.tar.gz -C /tmp/openssl-dist; \
-    if [ -n "$(ls -A /tmp/openssl-dist/lib 2>/dev/null || true)" ]; then \
-      echo "Found packaged OpenSSL libs:"; ls -lah /tmp/openssl-dist/lib || true; \
-      # copy to /usr/lib and /lib (some systems reference /lib)
-      cp -a /tmp/openssl-dist/lib/* /usr/lib/ || true; \
-      if [ -d /lib ]; then cp -a /tmp/openssl-dist/lib/* /lib/ || true; fi; \
-      rm -rf /tmp/openssl-dist /tmp/openssl-dist.tar.gz; \
-    else \
-      echo "ERROR: packaged OpenSSL libs missing from tarball"; ls -la /tmp/openssl-dist || true; exit 1; \
-    fi; \
-    echo "Post-copy lib listing:"; ls -lah /usr/lib/libcrypto* /usr/lib/libssl* /lib/libcrypto* /lib/libssl* 2>/dev/null || true
+      - name: Sign Debian image
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          echo "${{ steps.meta.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.dp.outputs.digest }}
 
-# try to update linker cache (no-op if ldconfig not present)
-RUN if command -v ldconfig >/dev/null 2>&1; then ldconfig; fi || true
-
-# Allow lyrebird to bind to ports < 1024
-RUN setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
-
-# remove packaged torrc (we generate one at runtime)
-RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
-
-# ensure tor directories exist and are owned by debian-tor
-RUN mkdir -p /var/log/tor /var/lib/tor \
- && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
-
-# copy entry scripts and helper
-COPY start-tor.sh /usr/local/bin/start-tor.sh
-COPY get-bridge-line /usr/local/bin/get-bridge-line
-RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
-
-USER debian-tor
-
-CMD [ "/bin/bash", "/usr/local/bin/start-tor.sh" ]
+      - name: Sign Alpine image
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          echo "${{ steps.alpine-tags.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.ap.outputs.digest }}
