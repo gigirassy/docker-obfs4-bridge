@@ -1,5 +1,7 @@
-# Dockerfile.alpine (updated)
+# Dockerfile.alpine
 ARG OPENSSL_VERSION='3.5.2'
+ARG UID=101
+ARG GID=101
 
 # ----------------------
 # Builder stage
@@ -7,6 +9,7 @@ ARG OPENSSL_VERSION='3.5.2'
 FROM golang:1.22-alpine AS builder
 ARG OPENSSL_VERSION
 
+# build deps for lyrebird + OpenSSL
 RUN apk add --no-cache \
       git \
       curl \
@@ -20,48 +23,62 @@ RUN apk add --no-cache \
 
 WORKDIR /src
 
-# Clone and build lyrebird
+# Clone and build lyrebird (static-friendly flags)
 RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
 WORKDIR /src/lyrebird
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
     (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
-# Build OpenSSL from source and install into /usr/local/openssl
+# Build OpenSSL from source (minimal + optimized EC + no deprecated APIs)
 WORKDIR /src
 RUN curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz
 
 WORKDIR /src/openssl-${OPENSSL_VERSION}
-RUN JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) && \
-    ./Configure --prefix=/usr/local/openssl --openssldir=/etc/ssl && \
-    make -j${JOBS} && \
-    make install
+RUN \
+  # pick target based on uname -m so multi-arch buildx/native builds choose correct target
+  ARCH="$(uname -m)"; \
+  if [ "$ARCH" = "x86_64" ]; then TARGET=linux-x86_64; \
+  elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then TARGET=linux-aarch64; \
+  else TARGET=linux-generic; fi; \
+  echo "OpenSSL build target: $TARGET"; \
+  # bounded parallelism to avoid CI OOM/hangs (cap at 2)
+  JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1); \
+  if [ "$JOBS" -gt 2 ]; then JOBS=2; fi; \
+  echo "Building OpenSSL (JOBS=$JOBS)"; \
+  ./Configure "$TARGET" shared zlib enable-ec_nistp_64_gcc_128 no-deprecated && \
+  make -j${JOBS} || (echo "parallel build failed, retrying single-threaded"; make -j1) && \
+  make install_sw
 
-# Optionally strip shared objects to reduce size
-RUN if command -v strip >/dev/null 2>&1; then strip /usr/local/openssl/lib/*.so* || true; fi
+# Strip unneeded symbols on shared libs to reduce size
+RUN if command -v strip >/dev/null 2>&1; then \
+      for f in /usr/local/openssl/lib/*.so*; do \
+        strip --strip-unneeded "$f" || true; \
+      done; \
+    fi
 
-# Package runtime artifacts into a tarball (libs + binary if present)
-RUN mkdir -p /openssl-dist/lib /openssl-dist/bin; \
-    cp -a /usr/local/openssl/lib/* /openssl-dist/lib/ 2>/dev/null || true; \
-    cp -a /usr/local/openssl/bin/openssl /openssl-dist/bin/ 2>/dev/null || true; \
+# Package runtime OpenSSL artifacts into a tarball (libs only)
+RUN mkdir -p /openssl-dist/lib && \
+    cp -a /usr/local/openssl/lib/* /openssl-dist/lib/ 2>/dev/null || true && \
     tar -C /openssl-dist -czf /openssl-dist.tar.gz .
 
-# Prepare lyrebird for copy
+# Prepare lyrebird for runtime copy
 RUN mkdir -p /lyrebird-dist && cp /lyrebird/lyrebird /lyrebird-dist/ || true
 
 # ----------------------
 # Final runtime stage
 # ----------------------
 FROM alpine:latest
-
 ARG UID=101
 ARG GID=101
 ARG OPENSSL_VERSION
 
 LABEL maintainer="meskio <meskio@torproject.org>"
 
+# create user/group matching UID/GID for compatibility with Debian packaging expectations
 RUN addgroup -g "${GID}" debian-tor \
  && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
 
+# runtime packages: tor, bash (entrypoint), libcap (setcap), ca-certs, tar for extraction
 RUN apk add --no-cache \
       tor \
       bash \
@@ -69,32 +86,29 @@ RUN apk add --no-cache \
       ca-certificates \
       tar
 
-# Copy lyrebird
+# copy lyrebird
 COPY --from=builder /lyrebird-dist/lyrebird /usr/bin/lyrebird
+RUN chmod 0755 /usr/bin/lyrebird
 
-# Copy and extract OpenSSL runtime artifacts (the tar may or may not contain the 'openssl' binary)
+# copy & extract OpenSSL runtime tarball; copy libs into /usr/lib to be used by system
 COPY --from=builder /openssl-dist.tar.gz /tmp/openssl-dist.tar.gz
-RUN tar -xzf /tmp/openssl-dist.tar.gz -C / && rm /tmp/openssl-dist.tar.gz || true
+RUN mkdir -p /tmp/openssl-dist && tar -xzf /tmp/openssl-dist.tar.gz -C /tmp/openssl-dist && \
+    cp -a /tmp/openssl-dist/lib/* /usr/lib/ || true && rm -rf /tmp/openssl-dist /tmp/openssl-dist.tar.gz
 
-# If libs landed under /lib or /usr/lib depending on layout, ensure they are available for dynamic loader:
-# (typically we copied into /usr/lib because builder used /usr/local/openssl/lib)
-RUN if [ -d /lib ]; then true; fi
-
-# Ensure correct permissions
-RUN chmod 0755 /usr/bin/lyrebird || true
-
-# Update linker cache if available (no-op on minimal Alpine if ldconfig missing)
+# (optional) update linker cache if available
 RUN if command -v ldconfig >/dev/null 2>&1; then ldconfig; fi || true
 
-# Give lyrebird binding capability
+# Allow lyrebird to bind to ports < 1024
 RUN setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
 
-# Remove pre-existing torrc (we generate at runtime)
+# Ensure tor config dir is generated at runtime; remove any packaged torrc
 RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
 
+# ensure tor directories exist and are owned by debian-tor
 RUN mkdir -p /var/log/tor /var/lib/tor \
  && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
 
+# copy entry scripts and helper
 COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
 RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
