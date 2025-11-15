@@ -1,69 +1,116 @@
-# --- builder: build a small static lyrebird binary on Alpine ---
-FROM golang:1.25.4-alpine3.22 AS builder
+# Dockerfile.alpine
+# Build OpenSSL from source, build lyrebird, produce minimal Alpine runtime.
+# Usage: docker build -f Dockerfile.alpine -t ... .
+ARG OPENSSL_VERSION='3.5.2'
 
-# keep build image minimal
-RUN apk add --no-cache git make
+# ----------------------
+# Builder stage
+# ----------------------
+FROM golang:1.22-alpine AS builder
+ARG OPENSSL_VERSION
+
+# Build dependencies for OpenSSL and lyrebird
+RUN apk add --no-cache \
+      git \
+      curl \
+      perl \
+      build-base \
+      zlib-dev \
+      linux-headers \
+      make \
+      ca-certificates
 
 WORKDIR /src
 
-# fetch lyrebird and build a small static binary
+# Clone lyrebird and build (static-friendly flags)
 RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
-
 WORKDIR /src/lyrebird
 
-# Build with flags to minimize size. CGO disabled for a static binary.
-# Adjust the final output path to match what you expect to COPY from.
+# Build lyrebird; try ./cmd/lyrebird first then fallback to root.
+# Use CGO disabled and strip symbols to reduce size.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
     (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
-# --- runtime: minimal Alpine with tor, bash, libcap for setcap ---
+# Build OpenSSL from source and install into /usr/local/openssl
+WORKDIR /src
+RUN curl -fsSL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" | tar xz
+
+WORKDIR /src/openssl-${OPENSSL_VERSION}
+# Use a safe job count fallback
+RUN JOBS=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) && \
+    ./Configure --prefix=/usr/local/openssl --openssldir=/etc/ssl && \
+    make -j${JOBS} && \
+    make install_sw
+
+# Strip library binaries to reduce size (if strip exists)
+RUN if command -v strip >/dev/null 2>&1; then strip /usr/local/openssl/lib/*.so* || true; fi
+
+# Collect what we need for final image:
+# - OpenSSL runtime libs in /openssl-dist/lib
+# - openssl binary in /openssl-dist/bin
+RUN mkdir -p /openssl-dist/lib /openssl-dist/bin && \
+    cp -a /usr/local/openssl/lib/* /openssl-dist/lib/ && \
+    cp -a /usr/local/openssl/bin/openssl /openssl-dist/bin/ || true
+
+# Also make the lyrebird binary available for copy
+RUN mkdir -p /lyrebird-dist && cp /lyrebird/lyrebird /lyrebird-dist/
+
+# ----------------------
+# Final runtime stage
+# ----------------------
 FROM alpine:latest
 
-# allow build-time override for UID / GID for compatibility
 ARG UID=101
 ARG GID=101
+ARG OPENSSL_VERSION
 
 LABEL maintainer="meskio <meskio@torproject.org>"
 
-# create user/group with the same UID/GID as the Debian image did
-# -G flag on adduser expects a group name already present, so create the group first
+# Create user/group matching Debian image uid/gid for compatibility
 RUN addgroup -g "${GID}" debian-tor \
  && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
 
-# Install runtime packages:
-# - tor : Tor daemon from Alpine (keeps same package name 'tor' so swapping is safe)
-# - bash: required by your entrypoint
-# - libcap: provides setcap to keep binding <1024 capability
-# - ca-certificates: TLS roots for tor/other HTTPS operations
-# Install and clean in one layer for minimal image size.
+# Install minimal runtime packages:
+# - tor (from Alpine packages) so package layout and behavior is compatible with original.
+# - bash for the entrypoint as you requested
+# - libcap for setcap
+# - ca-certificates for TLS
 RUN apk add --no-cache \
       tor \
       bash \
       libcap \
       ca-certificates
 
-# copy lyrebird from builder stage
-COPY --from=builder /lyrebird/lyrebird /usr/bin/lyrebird
+# Copy lyrebird from builder
+COPY --from=builder /lyrebird-dist/lyrebird /usr/bin/lyrebird
 
-# make sure binary is executable (should already be), then give it the capability to bind low ports
-RUN chmod 0755 /usr/bin/lyrebird \
- && setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
+# Copy our OpenSSL-built runtime libs and binary and overwrite system ones.
+# This will replace the Alpine-provided OpenSSL runtime with the one we built.
+COPY --from=builder /openssl-dist/lib/* /usr/lib/
+COPY --from=builder /openssl-dist/bin/openssl /usr/bin/openssl
 
-# Our torrc is generated at run-time by the script start-tor.sh (remove any default)
+# Ensure correct permissions
+RUN chmod 0755 /usr/bin/lyrebird /usr/bin/openssl || true
+
+# Try to update linker cache (ldconfig might not be present; harmless if missing)
+RUN if command -v ldconfig >/dev/null 2>&1; then ldconfig; fi || true
+
+# Allow lyrebird to bind to ports < 1024
+RUN setcap cap_net_bind_service=+ep /usr/bin/lyrebird || true
+
+# Remove pre-existing torrc (we generate at runtime)
 RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
 
-# ensure tor-related dirs are owned by the debian-tor user we created
+# Ensure tor directories exist and are owned by debian-tor
 RUN mkdir -p /var/log/tor /var/lib/tor \
  && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
 
-# copy entry/start scripts and helper
+# Copy entry scripts
 COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
-
 RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
 
-# switch to the debian-tor user (keeps behavior compatible with previous image)
 USER debian-tor
 
-# Use bash explicitly for the entrypoint so scripts that expect bash features work
+# Keep bash as entrypoint (explicit)
 CMD [ "/bin/bash", "/usr/local/bin/start-tor.sh" ]
