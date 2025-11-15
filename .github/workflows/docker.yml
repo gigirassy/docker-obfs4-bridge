@@ -25,6 +25,13 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+
+    # Build once per platform, run platforms sequentially to avoid concurrent heavy builds.
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+      max-parallel: 1
+
     permissions:
       contents: read
       packages: write
@@ -71,18 +78,17 @@ jobs:
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
-      # Build and push Debian-based Docker image (uses default Dockerfile)
-      - name: Build and push Docker image (Debian)
+      # Build and push Debian-based Docker image for this platform
+      - name: Build and push Docker image (Debian) — ${{ matrix.platform }}
         id: build-and-push
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
           context: .
-          # default Dockerfile in repo root
           file: ./Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -92,7 +98,6 @@ jobs:
         shell: bash
         run: |
           tags="${{ steps.meta.outputs.tags }}"
-          # build new comma-separated list where each tag gets "-alpine" appended to the tag part
           alpine=""
           IFS=',' read -ra arr <<< "$tags"
           for t in "${arr[@]}"; do
@@ -107,8 +112,8 @@ jobs:
           alpine="${alpine%,}"
           echo "tags=$alpine" >> "$GITHUB_OUTPUT"
 
-      # Build and push Alpine-based Docker image using Dockerfile.alpine
-      - name: Build and push Docker image (Alpine)
+      # Build and push Alpine-based Docker image using Dockerfile.alpine for this platform
+      - name: Build and push Docker image (Alpine) — ${{ matrix.platform }}
         id: build-and-push-alpine
         uses: docker/build-push-action@0565240e2d4ab88bba5387d719585280857ece09 # v5.0.0
         with:
@@ -117,12 +122,12 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.alpine-tags.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # Sign the resulting Debian-based Docker image digest except on PRs.
-      - name: Sign the published Docker image (Debian)
+      - name: Sign the published Docker image (Debian) — ${{ matrix.platform }}
         if: ${{ github.event_name != 'pull_request' }}
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
@@ -131,7 +136,7 @@ jobs:
           echo "${TAGS}" | xargs -I {} cosign sign --yes {}@${DIGEST}
 
       # Sign the resulting Alpine Docker image digest except on PRs.
-      - name: Sign the published Docker image (Alpine)
+      - name: Sign the published Docker image (Alpine) — ${{ matrix.platform }}
         if: ${{ github.event_name != 'pull_request' }}
         env:
           TAGS: ${{ steps.alpine-tags.outputs.tags }}
