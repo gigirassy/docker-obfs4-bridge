@@ -1,37 +1,6 @@
-# This file assists operators in (re-)deploying an obfs4 bridge Docker
-# container.  You need the tool 'docker-compose' to use this file.  You
-# can find it in the Debian package 'docker-compose'.
-#
-# First, you need to create a configuration file, ".env", in the same directory
-# as this file, "docker-compose.yml".  Add the following environment variables
-# to this configuration file.  EMAIL is your email address; OR_PORT is your
-# onion routing port; and PT_PORT is your obfs4 port:
-#
-#   EMAIL=you@example.com
-#   OR_PORT=XXX
-#   PT_PORT=XXX
-#
-# If needed, you can also activate there an additional variables processing with:
-#
-#   OBFS4_ENABLE_ADDITIONAL_VARIABLES=1
-#
-# followed by defining desired torrc entries prefixed with OBFS4V_
-# For example:
-#
-#   OBFS4V_AddressDisableIPv6=1
-#
-# Next, pull the Docker image, by running:
-#
-#   docker-compose pull obfs4-bridge
-#
-# And finally, to (re-)deploy the container, run:
-#
-#   docker-compose up -d obfs4-bridge
-
-version: "3.4"
 services:
   obfs4-bridge:
-    image: thetorproject/obfs4-bridge:latest
+    image: ghcr.io/gigirassy/docker-obfs4-bridge:main-alpine # want to use debian? remove -alpine part
     networks:
       - obfs4_bridge_external_network
     environment:
@@ -40,9 +9,11 @@ services:
       # Exit with an error message if PT_PORT is unset or empty.
       - PT_PORT=${PT_PORT:?Env var PT_PORT is not set.}
       # Exit with an error message if EMAIL is unset or empty.
-      - EMAIL=${EMAIL:?Env var EMAIL is not set.}
+      - EMAIL=${EMAIL:?Env var EMAIL is not set.} # this doesnt have to be an email
       # Nickname with default value: "DockerObfs4Bridge"
       - NICKNAME=${NICKNAME:-DockerObfs4Bridge}
+      - OBFS4_ENABLE_ADDITIONAL_VARIABLES=1
+      - OBFS4V_BridgeDistribution=settings # enable this to allow your bridge to be distributed to tor users that need it
     env_file:
       - .env
     volumes:
