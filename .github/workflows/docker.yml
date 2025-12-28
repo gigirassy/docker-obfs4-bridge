@@ -104,7 +104,7 @@ jobs:
               tagpart="${t##*:}"
               void+="${base}:${tagpart}-void,"
             else
-              alpine+="${t}-void,"
+              void+="${t}-void,"
             fi
           done
           void="${void%,}"
