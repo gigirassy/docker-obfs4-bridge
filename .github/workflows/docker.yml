@@ -1,4 +1,3 @@
-#x
 name: Docker
 
 on:
@@ -26,7 +25,8 @@ jobs:
     strategy:
       matrix:
         platform: [linux/amd64, linux/arm64]
-      max-parallel: 1
+      fail-fast: false
+      max-parallel: 2
 
     steps:
       - name: Checkout repository
@@ -55,80 +55,48 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      # Use native ARM runner when building for arm64
-      - name: Select runner for platform
-        run: echo "Using platform ${{ matrix.platform }}"
-
-      - name: Prepare Alpine tags
-        id: alpine-tags
-        shell: bash
-        run: |
-          tags="${{ steps.meta.outputs.tags }}"
-          alpine=""
-          IFS=',' read -ra arr <<< "$tags"
-          for t in "${arr[@]}"; do
-            if [[ "$t" == *":"* ]]; then
-              base="${t%%:*}"
-              tagpart="${t##*:}"
-              alpine+="${base}:${tagpart}-alpine,"
-            else
-              alpine+="${t}-alpine,"
-            fi
-          done
-          alpine="${alpine%,}"
-          echo "tags=$alpine" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push (Alpine)
-        id: ap
+      # Build Alpine multi-arch
+      - name: Build & push Alpine (multi-arch)
+        id: build-alpine
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.alpine
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.alpine-tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}-alpine
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
 
-      - name: Prepare Void tags
-        id: void-tags
-        shell: bash
-        run: |
-          tags="${{ steps.meta.outputs.tags }}"
-          void=""
-          IFS=',' read -ra arr <<< "$tags"
-          for t in "${arr[@]}"; do
-            if [[ "$t" == *":"* ]]; then
-              base="${t%%:*}"
-              tagpart="${t##*:}"
-              void+="${base}:${tagpart}-void,"
-            else
-              void+="${t}-void,"
-            fi
-          done
-          void="${void%,}"
-          echo "tags=$void" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push (Void)
-        id: void
+      # Build Void multi-arch
+      - name: Build & push Void (multi-arch)
+        id: build-void
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile.void
-          platforms: ${{ matrix.platform }}
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.void-tags.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}-void
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
 
-      - name: Sign Alpine image
-        if: ${{ github.event_name != 'pull_request' }}
+      # Sign Alpine image
+      - name: Sign Alpine images
+        if: github.event_name != 'pull_request'
         run: |
-          echo "${{ steps.alpine-tags.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.ap.outputs.digest }}
+          for tag in ${{ steps.meta.outputs.tags }}-alpine; do
+            cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag@${{ steps.build-alpine.outputs.digest }}
+          done
 
-      - name: Sign Void image
-        if: ${{ github.event_name != 'pull_request' }}
+      # Sign Void image
+      - name: Sign Void images
+        if: github.event_name != 'pull_request'
         run: |
-          echo "${{ steps.void-tags.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.ap.outputs.digest }}
+          for tag in ${{ steps.meta.outputs.tags }}-void; do
+            cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:$tag@${{ steps.build-void.outputs.digest }}
+          done
