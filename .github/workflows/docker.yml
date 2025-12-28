@@ -59,19 +59,6 @@ jobs:
       - name: Select runner for platform
         run: echo "Using platform ${{ matrix.platform }}"
 
-      - name: Build and push (Debian)
-        id: dp
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
       - name: Prepare Alpine tags
         id: alpine-tags
         shell: bash
@@ -104,12 +91,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Sign Debian image
-        if: ${{ github.event_name != 'pull_request' }}
+      - name: Prepare Void tags
+        id: void-tags
+        shell: bash
         run: |
-          echo "${{ steps.meta.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.dp.outputs.digest }}
+          tags="${{ steps.meta.outputs.tags }}"
+          void=""
+          IFS=',' read -ra arr <<< "$tags"
+          for t in "${arr[@]}"; do
+            if [[ "$t" == *":"* ]]; then
+              base="${t%%:*}"
+              tagpart="${t##*:}"
+              void+="${base}:${tagpart}-void,"
+            else
+              alpine+="${t}-void,"
+            fi
+          done
+          void="${void%,}"
+          echo "tags=$void" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (Void)
+        id: void
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.void
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.alpine-tags.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Sign Alpine image
         if: ${{ github.event_name != 'pull_request' }}
         run: |
           echo "${{ steps.alpine-tags.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.ap.outputs.digest }}
+
+      - name: Sign Void image
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          echo "${{ steps.void-tags.outputs.tags }}" | xargs -I {} cosign sign --yes {}@${{ steps.ap.outputs.digest }}
