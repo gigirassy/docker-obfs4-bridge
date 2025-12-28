@@ -19,99 +19,176 @@ permissions:
   id-token: write
 
 jobs:
-  build-x86:
-    name: Build on x86_64
+  # Prepare metadata (keeps tag logic consistent if you want to extend)
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+  # Native x86_64 build
+  build-amd64:
+    name: Build on x86_64 (amd64)
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      ALPINE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-alpine-amd64
+      VOID_TAG:   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-void-amd64
+    outputs:
+      alpine_digest: ${{ steps.build-alpine.outputs.digest }}
+      void_digest:   ${{ steps.build-void.outputs.digest }}
+      alpine_tag:    ${{ env.ALPINE_TAG }}
+      void_tag:      ${{ env.VOID_TAG }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & Push x86 Alpine
-        id: x86-alpine
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.alpine
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-alpine-amd64
-          outputs: type=image,digest=true
-
-      - name: Build & Push x86 Void
-        id: x86-void
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.void
-          platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-void-amd64
-          outputs: type=image,digest=true
-
-  build-arm:
-    name: Build on ARM64
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build & Push ARM Alpine
-        id: arm-alpine
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.alpine
-          platforms: linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-alpine-arm64
-          outputs: type=image,digest=true
-
-      - name: Build & Push ARM Void
-        id: arm-void
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile.void
-          platforms: linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-void-arm64
-          outputs: type=image,digest=true
-
-  manifest:
-    name: Create & Push Multi-Arch Manifests
-    needs: [build-x86, build-arm]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Log in to registry
+      - name: Login to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          # try GHCR_PAT first (if set), otherwise use the GITHUB_TOKEN
+          password: ${{ secrets.GHCR_PAT || github.token }}
 
-      - name: Create Alpine Manifest
-        run: |
-          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:alpine \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-alpine-amd64@${{ needs.build-x86.outputs['x86-alpine.digest'] }} \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-alpine-arm64@${{ needs.build-arm.outputs['arm-alpine.digest'] }}
-          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:alpine
+      - name: Build & Push Alpine (amd64)
+        id: build-alpine
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.alpine
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.ALPINE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
 
-      - name: Create Void Manifest
+      - name: Build & Push Void (amd64)
+        id: build-void
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.void
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.VOID_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
+
+  # Native ARM64 build
+  build-arm64:
+    name: Build on arm64
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    env:
+      ALPINE_TAG: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-alpine-arm64
+      VOID_TAG:   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:build-${{ github.run_id }}-void-arm64
+    outputs:
+      alpine_digest: ${{ steps.build-alpine.outputs.digest }}
+      void_digest:   ${{ steps.build-void.outputs.digest }}
+      alpine_tag:    ${{ env.ALPINE_TAG }}
+      void_tag:      ${{ env.VOID_TAG }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT || github.token }}
+
+      - name: Build & Push Alpine (arm64)
+        id: build-alpine
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.alpine
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.ALPINE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
+
+      - name: Build & Push Void (arm64)
+        id: build-void
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.void
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.VOID_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          outputs: type=image,digest=true
+
+  # Create multi-arch manifests and sign them
+  manifest:
+    name: Create & Push Multi-Arch Manifests, then Sign
+    needs: [ build-amd64, build-arm64 ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (needed for some runners/tools consistency)
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx (imagetools)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT || github.token }}
+
+      - name: Create Alpine multi-arch manifest and push
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
-          docker manifest create ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:void \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-void-amd64@${{ needs.build-x86.outputs['x86-void.digest'] }} \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest-void-arm64@${{ needs.build-arm.outputs['arm-void.digest'] }}
-          docker manifest push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:void
+          # Compose full image ref with the arch tags and digests produced earlier
+          amd_tag=${{ needs.build-amd64.outputs.alpine_tag }}
+          amd_digest=${{ needs.build-amd64.outputs.alpine_digest }}
+          arm_tag=${{ needs.build-arm64.outputs.alpine_tag }}
+          arm_digest=${{ needs.build-arm64.outputs.alpine_digest }}
+
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:alpine \
+            ${amd_tag}@${amd_digest} ${arm_tag}@${arm_digest}
+
+      - name: Create Void multi-arch manifest and push
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          amd_tag=${{ needs.build-amd64.outputs.void_tag }}
+          amd_digest=${{ needs.build-amd64.outputs.void_digest }}
+          arm_tag=${{ needs.build-arm64.outputs.void_tag }}
+          arm_digest=${{ needs.build-arm64.outputs.void_digest }}
+
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:void \
+            ${amd_tag}@${amd_digest} ${arm_tag}@${arm_digest}
 
       - name: Install cosign
         if: github.event_name != 'pull_request'
@@ -119,12 +196,29 @@ jobs:
         with:
           cosign-release: 'v2.2.4'
 
-      - name: Sign Alpine Manifest
+      - name: Sign Alpine manifest
         if: github.event_name != 'pull_request'
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:alpine
 
-      - name: Sign Void Manifest
+      - name: Sign Void manifest
         if: github.event_name != 'pull_request'
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:void
+
+      # Optional: if this run was a tag push, also create a versioned manifest (e.g. :v1.2.3)
+      - name: Create versioned manifests (tag push)
+        if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          ver=${{ github.ref_name }}
+
+          # Alpine
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${ver} \
+            ${{ needs.build-amd64.outputs.alpine_tag }}@${{ needs.build-amd64.outputs.alpine_digest }} \
+            ${{ needs.build-arm64.outputs.alpine_tag }}@${{ needs.build-arm64.outputs.alpine_digest }}
+
+          # Void (versioned)
+          docker buildx imagetools create -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${ver}-void \
+            ${{ needs.build-amd64.outputs.void_tag }}@${{ needs.build-amd64.outputs.void_digest }} \
+            ${{ needs.build-arm64.outputs.void_tag }}@${{ needs.build-arm64.outputs.void_digest }}
+
