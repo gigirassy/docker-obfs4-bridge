@@ -121,9 +121,9 @@ COPY get-bridge-line /usr/local/bin/get-bridge-line
 RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line || true
 
 # Go runtime tuning (adjust)
-ENV GOGC=30 \
+ENV GOGC=20 \
     GOMAXPROCS=1 \
-    GOMEMLIMIT=256MiB
+    GOMEMLIMIT=128MiB
 
 # run as numeric UID:GID
 USER ${UID}:${GID}
