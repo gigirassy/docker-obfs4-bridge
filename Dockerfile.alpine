@@ -1,84 +1,131 @@
-# Dockerfile.alpine - minimal musl-based image using musl allocator (default)
-# Builds a small static lyrebird binary (CGO disabled), strips symbols, and
-# sets runtime env vars that limit Go's heap growth.
+# Dockerfile.alpine
+#
+# Builder: alpine (musl) -- installs tor + obfs4proxy and builds lyrebird
+# Runtime: busybox:1.37.0-musl -- only needed bins/libs/configs copied in
 
-# Builder stage: small Go image (matches lyrebird go.mod requirement)
-FROM golang:1.22-alpine AS builder
+# ---------------------------
+# builder: Alpine (musl)
+# ---------------------------
+FROM alpine:latest AS builder
 
-# Build-time deps
-RUN apk add --no-cache git make
+# Install build deps + packages we will copy into the final image
+# binutils provides readelf/file; ca-certificates for TLS; build-base not required if Go builds static
+RUN apk add --no-cache \
+      go git make ca-certificates \
+      tor obfs4proxy libcap \
+      binutils findutils
 
 WORKDIR /src
-
-# Clone and build lyrebird
 RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
-
 WORKDIR /src/lyrebird
 
-# Build static, trimmed binary (CGO disabled). Try common entrypoints.
-# - CGO_ENABLED=0 produces a statically-linked binary (no jemalloc/mimalloc),
-# - -trimpath and -ldflags "-s -w" strip debug symbols to reduce size.
+# Build a trimmed, optionally static Go binary (CGO disabled). If you need cgo, remove CGO_ENABLED=0.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
     (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
-# Runtime: minimal Alpine with tor and bash, using musl allocator by default
-FROM alpine:latest
+# Collect artifacts: binaries, resolved interpreter(s), shared libs, and tor data (geoip)
+RUN set -ex; \
+    ART=/artifacts; \
+    mkdir -p "$ART/bin" "$ART/lib" "$ART/etc" "$ART/share/tor"; \
+    BINS="tor obfs4proxy lyrebird"; \
+    for B in $BINS; do \
+      FOUND=''; \
+      for D in /usr/bin /usr/sbin /usr/local/bin /bin /sbin /opt/bin /usr/libexec; do \
+        [ -x "$D/$B" ] && { FOUND="$D/$B"; break; } || true; \
+      done; \
+      if [ -z "$FOUND" ]; then FOUND=$(find / -xdev -type f -name "$B" -perm -111 2>/dev/null | head -n1 || true); fi; \
+      if [ -n "$FOUND" ]; then echo "found $B at $FOUND"; cp -L "$FOUND" "$ART/bin/$(basename "$FOUND")"; else echo "warning: $B not found"; fi; \
+    done; \
+    # copy tor's share files (geoip, geoip6) and /etc/tor if present
+    [ -d /usr/share/tor ] && cp -a /usr/share/tor "$ART/share/tor" || true; \
+    [ -d /etc/tor ] && cp -a /etc/tor "$ART/etc/tor" || true; \
+    [ -d /etc/ssl ] && cp -a /etc/ssl "$ART/etc/ssl" || true; \
+    # For each copied binary: copy INTERP target and DT_NEEDED libs (dereference links)
+    > "$ART/interp-map.txt"; \
+    for BIN in "$ART"/bin/*; do \
+      [ -e "$BIN" ] || continue; \
+      echo "=== inspect $BIN ==="; \
+      file "$BIN" || true; \
+      if command -v readelf >/dev/null 2>&1; then \
+        readelf -l "$BIN" 2>/dev/null | awk '/INTERP/ {gsub(/\\[|\\]/,"",$2); print $2}' | while read -r I; do \
+          [ -z "$I" ] && continue; \
+          RESOLVED=$(readlink -f "$I" 2>/dev/null || true); \
+          if [ -n "$RESOLVED" ] && [ -f "$RESOLVED" ]; then \
+            echo "copy interp target $RESOLVED (orig $I)"; \
+            cp -L "$RESOLVED" "$ART/lib/$(basename "$RESOLVED")"; \
+            echo "$I $(basename "$RESOLVED")" >> "$ART/interp-map.txt"; \
+          fi; \
+        done; \
+      fi; \
+      # ldd-based libs
+      ldd "$BIN" 2>/dev/null | awk '/=>/ {print $(NF-1)}; /ld-musl/ {print $1}' | sort -u | while read -r LIB; do \
+        [ -z "$LIB" ] && continue; \
+        if [ -f "$LIB" ]; then cp -L "$LIB" "$ART/lib/" || true; fi; \
+      done || true; \
+      # fallback: DT_NEEDED names -> try to locate in common lib dirs
+      if command -v readelf >/dev/null 2>&1; then \
+        readelf -d "$BIN" 2>/dev/null | awk '/NEEDED/ {gsub(/\\[|\\]|\\\"/,"",$2); print $2}' | while read -r N; do \
+          for LD in /lib /usr/lib /usr/local/lib /lib64; do \
+            F=$(find "$LD" -maxdepth 2 -type f -name "${N}" 2>/dev/null | head -n1 || true); \
+            [ -n "$F" ] && { cp -L "$F" "$ART/lib/" || true; break; } || true; \
+          done; \
+        done; \
+      fi; \
+    done; \
+    # also copy any musl loader file(s) present
+    cp -a /lib/ld-musl* "$ART/lib/" 2>/dev/null || true; \
+    echo "artifact assembled:"; ls -lah "$ART" || true
+
+# ---------------------------
+# runtime: BusyBox (musl)
+# ---------------------------
+FROM busybox:1.37.0-musl
 
 ARG UID=101
 ARG GID=101
 
-LABEL maintainer="meskio <meskio@torproject.org>"
+LABEL maintainer="you@example.org"
 
-# Create user/group matching Debian-derived setup
-RUN addgroup -g "${GID}" debian-tor \
- && adduser -D -u "${UID}" -G debian-tor -s /bin/bash -h /var/lib/tor debian-tor
+COPY --from=builder /artifacts /artifacts
 
-# Install only needed runtime packages:
-# - tor (from Alpine) — keeps package name 'tor' so swapping is easy
-# - bash for entrypoint compatibility
-# - libcap for setcap
-# - ca-certificates for TLS
-RUN apk add --no-cache \
-      tor \
-      bash \
-      libcap \
-      ca-certificates
+# Install artifacts into final rootfs and recreate interpreter symlinks recorded in interp-map.txt
+RUN set -ex; \
+    mkdir -p /usr/bin /lib /etc /usr/share/tor /var/log/tor /var/lib/tor /usr/local/bin; \
+    # copy binaries
+    if [ -d /artifacts/bin ]; then for F in /artifacts/bin/*; do [ -e "$F" ] || continue; cp -a "$F" "/usr/bin/$(basename "$F")" || true; done; fi; \
+    # copy libs
+    if [ -d /artifacts/lib ]; then cp -a /artifacts/lib/* /lib/ || true; fi; \
+    # recreate interpreter symlinks as recorded in interp-map.txt
+    if [ -f /artifacts/interp-map.txt ]; then \
+      while read -r ORIG BASENAME; do \
+        [ -z "$ORIG" ] && continue; \
+        mkdir -p "$(dirname "$ORIG")"; \
+        ln -sf "/lib/$BASENAME" "$ORIG"; \
+      done < /artifacts/interp-map.txt || true; \
+      cat /artifacts/interp-map.txt || true; \
+    fi; \
+    # copy tor share (geoip) and config if present
+    if [ -d /artifacts/share/tor ]; then cp -a /artifacts/share/tor /usr/share/ || true; fi; \
+    if [ -d /artifacts/etc/tor ]; then cp -a /artifacts/etc/tor /etc/ || true; fi; \
+    if [ -d /artifacts/etc/ssl ]; then cp -a /artifacts/etc/ssl /etc/ || true; fi; \
+    chmod 0755 /usr/bin/* 2>/dev/null || true; \
+    rm -rf /artifacts || true; \
+    echo "final /usr/bin and /lib:"; ls -l /usr/bin | sed -n '1,200p' || true; ls -l /lib | sed -n '1,200p' || true
 
-# Copy the lyrebird binary from builder
-COPY --from=builder /lyrebird/lyrebird /usr/bin/lyrebird
+# ensure directories exist and owned by numeric uid/gid (no adduser)
+RUN mkdir -p /etc/tor /var/log/tor /var/lib/tor && chown -R ${UID}:${GID} /etc/tor /var/log/tor /var/lib/tor /usr/local/bin || true
 
-# Ensure executable and give it capability to bind <1024 ports
-RUN chmod 0755 /usr/bin/lyrebird \
- && setcap cap_net_bind_service=+ep /usr/bin/lyrebird
-
-# Remove any default torrc (your start script generates torrc)
-RUN [ -f /etc/tor/torrc ] && rm -f /etc/tor/torrc || true
-
-# Ensure tor data/log dirs exist with correct ownership
-RUN mkdir -p /var/log/tor /var/lib/tor \
- && chown -R debian-tor:debian-tor /etc/tor /var/log/tor /var/lib/tor
-
-# Copy entry script(s) — ensure filenames are ASCII hyphens in the repo
+# copy entrypoint scripts (POSIX/sh compatible)
 COPY start-tor.sh /usr/local/bin/start-tor.sh
 COPY get-bridge-line /usr/local/bin/get-bridge-line
+RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line || true
 
-RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line
+# Go runtime tuning (adjust)
+ENV GOGC=30 \
+    GOMAXPROCS=1 \
+    GOMEMLIMIT=256MiB
 
-# Runtime memory/tuning environment variables:
-# - GOGC controls heap growth (percent). Lower => more frequent GC => smaller heap.
-#   Good starting values: 50 (conservative) or 30 (more aggressive).
-# - GOMAXPROCS limits number of OS threads Go will use. Reducing can lower concurrency
-#   (and memory for stacks) while possibly affecting throughput — tune carefully.
-# - GOMEMLIMIT (optional): If Lyrebird was built with Go >= 1.19+, you can set this
-#   to a rad value like "256MiB" to tell the runtime an upper soft memory limit.
-#   NOTE: GOMEMLIMIT is available in modern Go releases; if unsure, omit it.
-ENV GOGC=50 \
-    GOMAXPROCS=1
-# Optionally uncomment and set if you built with Go >=1.19 and want a hard-ish limit:
-# ENV GOMEMLIMIT=256MiB
+# run as numeric UID:GID
+USER ${UID}:${GID}
 
-# Drop to the non-root user used previously
-USER debian-tor
-
-# Use bash for the entrypoint (keeps behaviour compatible)
-CMD [ "/bin/bash", "/usr/local/bin/start-tor.sh" ]
+CMD [ "/bin/sh", "/usr/local/bin/start-tor.sh" ]
