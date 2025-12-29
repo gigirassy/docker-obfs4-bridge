@@ -84,8 +84,6 @@ FROM busybox:1.37.0-musl
 ARG UID=101
 ARG GID=101
 
-LABEL maintainer="you@example.org"
-
 COPY --from=builder /artifacts /artifacts
 
 # Install artifacts into final rootfs and recreate interpreter symlinks recorded in interp-map.txt
@@ -123,7 +121,7 @@ RUN chmod 0755 /usr/local/bin/start-tor.sh /usr/local/bin/get-bridge-line || tru
 # Go runtime tuning (adjust)
 ENV GOGC=20 \
     GOMAXPROCS=1 \
-    GOMEMLIMIT=128MiB
+    GOMEMLIMIT=70MiB
 
 # run as numeric UID:GID
 USER ${UID}:${GID}
