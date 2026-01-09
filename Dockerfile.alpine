@@ -9,11 +9,18 @@
 FROM alpine:latest AS builder
 
 # Install build deps + packages we will copy into the final image
-# binutils provides readelf/file; ca-certificates for TLS; build-base not required if Go builds static
+# binutils provides readelf/file; ca-certificates for TLS; we add clang + musl-dev so clang can build against musl
 RUN apk add --no-cache \
       go git make ca-certificates \
       tor obfs4proxy libcap \
-      binutils findutils
+      binutils findutils \
+      clang musl-dev
+
+# Ensure clang is the C/C++ compiler used for any cgo builds
+ENV CC=clang \
+    CXX=clang++ \
+    # Enable cgo so clang is actually used; set to 0 if you want a pure static Go build
+    CGO_ENABLED=1
 
 WORKDIR /src
 RUN git clone https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird /src/lyrebird
@@ -23,11 +30,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go mod download
 
-# Build a trimmed, optionally static Go binary (CGO disabled). If you need cgo, remove CGO_ENABLED=0.
+# Build a trimmed Go binary. Using CGO_ENABLED=1 so clang will be used for any cgo steps.
+# If you want a fully static build that doesn't use cgo, change CGO_ENABLED=1 -> CGO_ENABLED=0.
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
-    (CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
+    CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird ./cmd/lyrebird || \
+    (CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /lyrebird/lyrebird .)
 
 # Collect artifacts: binaries, resolved interpreter(s), shared libs, and tor data (geoip)
 RUN set -ex; \
