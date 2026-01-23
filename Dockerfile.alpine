@@ -6,7 +6,9 @@
 # ---------------------------
 # builder: Alpine (musl)
 # ---------------------------
-FROM 11notes/alpine AS builder
+FROM 11notes/alpine:stable AS builder
+
+USER root
 
 # Install build deps + packages we will copy into the final image
 # binutils provides readelf/file; ca-certificates for TLS; build-base not required if Go builds static
