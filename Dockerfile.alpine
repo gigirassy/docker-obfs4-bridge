@@ -6,7 +6,7 @@
 # ---------------------------
 # builder: Alpine (musl)
 # ---------------------------
-FROM 11notes/alpine:stable AS builder
+FROM kgrv/golang AS builder
 
 USER root
 
