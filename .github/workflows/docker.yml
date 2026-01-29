@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   build-amd64:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04-32
     outputs:
       amd_digest: ${{ steps.build.outputs.digest }}
 
@@ -44,7 +44,7 @@ jobs:
           outputs: type=image,digest=true
 
   build-arm64:
-    runs-on: ubuntu-24.04-arm
+    runs-on: depot-ubuntu-24.04-arm-32
     needs: build-amd64
     outputs:
       arm_digest: ${{ steps.build.outputs.digest }}
